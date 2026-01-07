@@ -1,0 +1,14 @@
+syntax = "proto3";
+package xlpipes;
+
+message Empty {}
+
+message Msg {
+  string text = 1;
+  string caption = 2;
+}
+
+service Pipes {
+  rpc ShowMessage (Msg) returns (Empty);
+}
+

@@ -1,0 +1,25 @@
+/* Minimal baseline styles to make the chat UI presentable without a library theme */
+:root {
+  --border: #e5e5e5;
+  --muted: #666;
+  --bg: #ffffff;
+  --panel: #fafafa;
+}
+* { box-sizing: border-box }
+html, body, #root { height: 100%; margin: 0; background: var(--bg); }
+body { font: 14px "Segoe UI", SegoeUI, Arial, sans-serif; color: #111; }
+button, input, textarea { font: inherit }
+button { cursor: pointer }
+input[type="text"], textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+button.primary {
+  background: #0b57d0; color: #fff; border: 1px solid #0b57d0; border-radius: 6px;
+  padding: 8px 12px;
+}
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px }
+.scroll { overflow: auto }
+

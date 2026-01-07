@@ -1,0 +1,48 @@
+# Visual Studio / MSBuild
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Build outputs
+bin/
+obj/
+*.log
+*.cache
+*.pch
+*.db
+*.opendb
+*.tlog
+*.lastbuildstate
+
+# NuGet
+packages/
+*.nupkg
+*.snupkg
+project.lock.json
+nuget.config
+*.nuget.props
+*.nuget.targets
+
+# Roslyn / VS tooling
+*.ide
+*.generated.cs
+
+# Web / Node
+node_modules/
+dist/
+build/
+coverage/
+*.tgz
+
+# Rider / VS Code
+.idea/
+.vscode/
+
+# Misc
+*.DS_Store
+Thumbs.db
+*.bak
+*.tmp
+~$*
