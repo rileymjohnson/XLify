@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Drawing;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -7,11 +7,9 @@ using Microsoft.Web.WebView2.Core;
 using System.IO;
 using System.Diagnostics;
 using Excel = Microsoft.Office.Interop.Excel;
-using System.Net.Http;
-using System.Net.Http.Headers;
 using System.Text;
 using System.Net;
-using System.Security.Authentication;
+ 
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.SemanticKernel;
@@ -21,7 +19,6 @@ using Microsoft.SemanticKernel.Agents;
 using Microsoft.SemanticKernel.Agents.OpenAI;
 using OpenAI;
 using OpenAI.Responses;
-using ChatWebSearchOptions = OpenAI.Chat.ChatWebSearchOptions;
 using Serilog;
  
 
@@ -32,10 +29,7 @@ namespace XLify
         private WebView2 _web;
         private readonly string _sessionId = Guid.NewGuid().ToString("n");
         private bool _sessionCreated;
-        private static readonly HttpClient _http = new HttpClient(new HttpClientHandler
-        {
-            SslProtocols = SslProtocols.Tls12
-        });
+        // Removed: direct HTTP client for Responses; rely on SK agent
         private Kernel _kernel;
         private IChatCompletionService _chatService;
         private OpenAIResponseAgent _responseAgent;
@@ -151,262 +145,20 @@ namespace XLify
                             await HandleUserPromptAsync(inputText).ConfigureAwait(false);
                             return;
                         }
-
-                        // Build and log the OpenAI payload (no call yet)
+                        
+                        // Route any other message containing text through the main handler
                         if (!string.IsNullOrWhiteSpace(inputText))
                         {
-                            try { AppendConversation("user", inputText); } catch { }
-                            var messagesPayload = BuildChatMessages(inputText);
-                            var payloadJson = new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(messagesPayload);
-                            try { Debug.WriteLine("[OpenAI Payload] " + payloadJson); } catch { }
-                            try { Console.WriteLine("[OpenAI Payload] " + payloadJson); } catch { }
-
-                            // Attempt an API call if key exists; print response to console
-                            var key = ApiKeyVault.Get();
-                            if (!string.IsNullOrWhiteSpace(key))
-                            {
-                                try
-                                {
-                                    var resp = await CallOpenAIAsync(key, payloadJson);
-                                    try { Debug.WriteLine("[OpenAI HTTP Response] " + resp); } catch { }
-                                    try { Console.WriteLine("[OpenAI HTTP Response] " + resp); } catch { }
-
-                                    var assistant = ExtractAssistantContent(resp);
-                                    var parsed = TryParseAssistantJson(assistant);
-                                    if (parsed != null)
-                                    {
-                                        var code = parsed.Value.code;
-                                        var respText = parsed.Value.response;
-                                        var initialRespText = respText;
-                                        var needsMoreInfo = parsed.Value.needsMoreInfo;
-
-                                        if (needsMoreInfo)
-                                        {
-                                            SendToWeb("assistant", null, string.IsNullOrWhiteSpace(respText) ? "I need more information to proceed." : respText, addToConversation: true);
-                                            return;
-                                        }
-
-                                        const int MaxAttempts = 2; // allow up to two auto-repair iterations
-                                        int attempt = 0;
-                                        string lastError = null;
-                                        string lastCode = code;
-
-                                        while (attempt <= MaxAttempts)
-                                        {
-                                            try { Debug.WriteLine("[AI Code]\n" + lastCode); } catch { }
-                                            try { Console.WriteLine("[AI Code]\n" + lastCode); } catch { }
-
-                                            try
-                                            {
-                                                var app = Globals.ThisAddIn?.Application;
-                                                // Capture console and context around the run
-                                                string outText = null, errText = null, digestBefore = null, digestAfter = null;
-                                                var oldOut = System.Console.Out;
-                                                var oldErr = System.Console.Error;
-                                                var swOut = new System.IO.StringWriter();
-                                                var swErr = new System.IO.StringWriter();
-                                                try
-                                                {
-                                                    System.Console.SetOut(swOut);
-                                                    System.Console.SetError(swErr);
-                                                    try { var ctxB = CollectExcelContext(); digestBefore = BuildContextDigest(ctxB); } catch { }
-                                                    if (app != null && !string.IsNullOrWhiteSpace(lastCode))
-                                                    {
-                                                        var execResp = await RoslynWorkerClient.ExecuteAsync(lastCode, _sessionId, timeoutMs: 20000);
-                                                        if (execResp == null || !execResp.Success)
-                                                        {
-                                                            var errMsg = execResp == null ? "Worker returned no response" : (execResp.Error ?? "Worker execution failed");
-                                                            try
-                                                            {
-                                                                System.Console.WriteLine("[XLIFY][Worker Error] " + (errMsg ?? "(no message)"));
-                                                                if (execResp != null)
-                                                                {
-                                                                    if (!string.IsNullOrEmpty(execResp.Output)) System.Console.WriteLine("[XLIFY][Worker Output] " + execResp.Output);
-                                                                    if (execResp.CompilationErrors != null && execResp.CompilationErrors.Count > 0)
-                                                                    {
-                                                                        System.Console.WriteLine("[XLIFY][Worker Diagnostics]");
-                                                                        foreach (var ce in execResp.CompilationErrors)
-                                                                        {
-                                                                            var line = (ce?.Severity ?? "?") + ": line " + ce?.Line + ", col " + ce?.Column + ": " + (ce?.Message ?? "");
-                                                                            System.Console.WriteLine(line);
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                            catch { }
-                                                            if (execResp != null && execResp.CompilationErrors != null && execResp.CompilationErrors.Count > 0)
-                                                            {
-                                                                var first = execResp.CompilationErrors[0];
-                                                                errMsg = $"{first.Severity}: {first.Message} at {first.Line}:{first.Column}";
-                                                            }
-                                                            throw new InvalidOperationException(errMsg);
-                                                        }
-                                                        try { if (!string.IsNullOrEmpty(execResp.Output)) System.Console.WriteLine(execResp.Output); } catch { }
-                                                    }
-                                                    try { var ctxA = CollectExcelContext(); digestAfter = BuildContextDigest(ctxA); } catch { }
-                                                }
-                                                finally
-                                                {
-                                                    try { outText = swOut.ToString(); errText = swErr.ToString(); } catch { }
-                                                    try { System.Console.SetOut(oldOut); } catch { }
-                                                    try { System.Console.SetError(oldErr); } catch { }
-                                                }
-                                                // Success
-                                                var displayResp = respText;
-                                                if (!string.IsNullOrWhiteSpace(displayResp) && displayResp.Trim().Equals("(previous)", StringComparison.OrdinalIgnoreCase))
-                                                {
-                                                    displayResp = initialRespText;
-                                                }
-                                                if (string.IsNullOrWhiteSpace(displayResp))
-                                                {
-                                                    try { SendToWeb("debug", null, "Assistant response empty; dumping raw payload.", addToConversation: false); } catch { }
-                                                    try { SendToWeb("debug_assistant", null, assistant ?? string.Empty, addToConversation: false); } catch { }
-                                                    try { SendToWeb("debug_openai_response", resp, null, addToConversation: false); } catch { }
-                                                }
-                                                else
-                                                {
-                                                    SendToWeb("assistant", null, displayResp, addToConversation: true);
-                                                }
-                                                try { AppendCodeRun(lastCode, true, BuildRunInfo(displayResp, outText, errText, digestBefore, digestAfter)); } catch { }
-                                                return;
-                                            }
-                                            catch (Exception execEx)
-                                            {
-                                                lastError = execEx.ToString();
-                                                try { Debug.WriteLine("[AI Exec Error][Attempt " + attempt + "] " + lastError); } catch { }
-                                                if (attempt == MaxAttempts)
-                                                {
-                                                    string userMsg = execEx.Message;
-                                                    try
-                                                    {
-                                                        var tie = execEx as System.Reflection.TargetInvocationException;
-                                                        if (tie != null && tie.InnerException != null)
-                                                        {
-                                                            userMsg = tie.InnerException.GetType().Name + ": " + tie.InnerException.Message;
-                                                            var com = tie.InnerException as System.Runtime.InteropServices.COMException;
-                                                            if (com != null) userMsg += " (0x" + com.ErrorCode.ToString("X8") + ")";
-                                                        }
-                                                    }
-                                                    catch { }
-                                                    try { AppendCodeRun(lastCode, false, BuildRunInfo(userMsg, null, null, null, null)); } catch { }
-                                                    SendToWeb("error", null, "Automation error: " + userMsg, addToConversation: true);
-                                                    return;
-                                                }
-
-                                                // Ask the model to repair based on the error
-                                                var repairPayload = BuildRepairMessages(inputText, lastCode, lastError);
-                                                var repairJson = new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(repairPayload);
-                                                try { Debug.WriteLine("[OpenAI Repair Request] " + repairJson); } catch { }
-                                                try { Console.WriteLine("[OpenAI Repair Request] " + repairJson); } catch { }
-                                                var repairResp = await CallOpenAIAsync(key, repairJson);
-                                                try { Debug.WriteLine("[OpenAI Repair Response] " + repairResp); } catch { }
-                                                try { Console.WriteLine("[OpenAI Repair Response] " + repairResp); } catch { }
-                                                var repairAssistant = ExtractAssistantContent(repairResp);
-                                                var repairParsed = TryParseAssistantJson(repairAssistant);
-                                                if (repairParsed != null)
-                                                {
-                                                    var nextCode = repairParsed.Value.code;
-                                                    // If the repair produced no code or identical code, stop early
-                                                    if (string.IsNullOrWhiteSpace(nextCode) || string.Equals(nextCode.Trim(), lastCode?.Trim(), StringComparison.Ordinal))
-                                                    {
-                                                        try { System.Console.WriteLine("[XLIFY] Repair produced no changes. Last error: " + (lastError ?? "(none)")); } catch { }
-                                                        var errJson2 = BuildJsonSafe("error", null, "Automation error: repair produced no changes");
-                                                        _web.CoreWebView2.PostWebMessageAsString(errJson2);
-                                                        return;
-                                                    }
-                                                    lastCode = nextCode;
-                                                    var candidateResp = repairParsed.Value.response;
-                                                    if (!string.IsNullOrWhiteSpace(candidateResp) && !candidateResp.Trim().Equals("(previous)", StringComparison.OrdinalIgnoreCase))
-                                                    {
-                                                        respText = candidateResp;
-                                                    }
-                                                    if (repairParsed.Value.needsMoreInfo)
-                                                    {
-                                                        SendToWeb("assistant", null, string.IsNullOrWhiteSpace(respText) ? "I need more information to proceed." : respText, addToConversation: true);
-                                                        return;
-                                                    }
-                                                }
-                else
-                {
-                    // Could not parse repair; if this is a rate-limit, show a friendly message
-                    try
-                    {
-                        int waitSec;
-                        if (IsRateLimitMessage(repairAssistant, out waitSec))
-                        {
-                            var nice = waitSec > 0
-                                ? ("I hit the OpenAI rate limit and need to wait " + waitSec + " seconds before retrying. You can add a payment method to increase limits, or try again shortly.")
-                                : "I hit the OpenAI rate limit. You can add a payment method to increase limits, or try again shortly.";
-                            var outJsonNice = BuildJsonSafe("assistant", null, nice);
-                            _web.CoreWebView2.PostWebMessageAsString(outJsonNice);
+                            await HandleUserPromptAsync(inputText).ConfigureAwait(false);
                             return;
                         }
-                    }
-                    catch { }
-
-                    // Could not parse repair; include a preview of the assistant text
-                    string preview = null;
-                    try { if (!string.IsNullOrEmpty(repairAssistant)) preview = repairAssistant.Length > 2000 ? repairAssistant.Substring(0, 2000) + "..." : repairAssistant; } catch { }
-                    var msg2 = string.IsNullOrWhiteSpace(preview) ? "Automation error: could not parse repair response (empty)" : ("Automation error: could not parse repair response. Preview: " + preview);
-                                                    SendToWeb("error", null, msg2, addToConversation: true);
-                                                    return;
-                }
-                                            }
-
-                                            attempt++;
-                                        }
-                                    }
-                else
-                {
-                    // If we failed to parse assistant JSON, check for rate limit and surface a friendly message
-                    try
-                    {
-                        int waitSec;
-                        if (IsRateLimitMessage(assistant, out waitSec))
-                        {
-                            var nice = waitSec > 0
-                                ? ("I hit the OpenAI rate limit and need to wait " + waitSec + " seconds before retrying. You can add a payment method to increase limits, or try again shortly.")
-                                : "I hit the OpenAI rate limit. You can add a payment method to increase limits, or try again shortly.";
-                            var outJsonNice = BuildJsonSafe("assistant", null, nice);
-                            _web.CoreWebView2.PostWebMessageAsString(outJsonNice);
-                            return;
                         }
-                    }
-                    catch { }
-
-                    // Surface the raw Responses API payload for debugging when no assistant content was extracted
-                    string preview = null;
-                    try { if (!string.IsNullOrEmpty(resp)) preview = resp.Length > 2000 ? resp.Substring(0, 2000) + "..." : resp; } catch { }
-                                        var msg = string.IsNullOrWhiteSpace(preview) ? "OpenAI Responses returned no content" : ("OpenAI Responses payload (truncated): " + preview);
-                                        SendToWeb("error", null, msg, addToConversation: true);
-                                    }
-                                    return;
-                                }
-                                catch (Exception httpEx)
-                                {
-                                    try { Debug.WriteLine("[OpenAI HTTP Error] " + httpEx.ToString()); } catch { }
-                                    SendToWeb("error", null, "OpenAI call failed: " + httpEx.Message, addToConversation: true);
-                                    return;
-                                }
-                            }
-                        }
-
-                        // No key or no input: send placeholder ack
-                        var replyText = string.IsNullOrWhiteSpace(inputText)
-                            ? "(No prompt provided)"
-                            : "Prepared OpenAI payload and logged it (no API key).";
-                        SendToWeb("assistant", null, replyText, addToConversation: true);
-                    }
-                    catch (Exception ex)
-                    {
-                        try
+                        catch (Exception ex)
                         {
                             try { Debug.WriteLine("[WebView2][Error] " + ex.ToString()); } catch { }
                             SendToWeb("error", null, ex.Message, addToConversation: true);
                         }
-                        catch { }
-                    }
-                });
+                    });
 
                 };
 
@@ -780,19 +532,7 @@ catch { }";
 
                 var history = BuildChatHistory(inputText);
 
-                // Optional: augment context with web search summary via Responses API
-                try
-                {
-                    var webSummary = await CallOpenAIWebSearchAsync(ApiKeyVault.Get(), inputText).ConfigureAwait(false);
-                    if (!string.IsNullOrWhiteSpace(webSummary))
-                    {
-                        history.AddSystemMessage("Web search results: " + Truncate(webSummary, 2000));
-                    }
-                }
-                catch (Exception webEx)
-                {
-                    try { Debug.WriteLine("[OpenAI Web Search error] " + webEx); } catch { }
-                }
+                // Web search prefetch removed; rely on search-enabled Responses model via agent
 
                 if (_responseAgent == null)
                 {
@@ -1450,7 +1190,7 @@ catch { }";
                     new { role = "system", content = new object[]{ new { type = "input_text", text = BuildRecentCodeSummary() } } },
                     new { role = "system", content = new object[]{ new { type = "input_text", text = "Special capabilities: You can use Excel COM automation to control add-ins. Solver: call Application.Run with 'Solver.xlam' macros (e.g., Application.Run(\\\"Solver.xlam!SolverReset\\\"); Application.Run(\\\"Solver.xlam!SolverOk\\\", targetRange, 2, 0, byChangeRange); Application.Run(\\\"Solver.xlam!SolverSolve\\\", true)). Verify the Solver add-in is installed/loaded (see ExcelContext.addIns) and set needs_more_info if not. Power Query: refresh queries via Application.ActiveWorkbook.RefreshAll() or iterate Application.ActiveWorkbook.Queries and call Refresh() where available. Analysis ToolPak: accessible via Application.Run on ATPVBAEN.XLAM macros when present (confirm via addIns before invoking)." } } },
                     new { role = "system", content = new object[]{ new { type = "input_text", text = specialCapabilities } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = "Dynamic COM rule: Always use dynamic for all Excel COM objects and chains to avoid object-typed members. Declare dynamic app = Application; dynamic ws = app.ActiveSheet; then use ws.Cells[1,1].Value2, ws.Range(\"A1\", \"B10\"), etc. Do NOT use var where the inferred type would be object; if you choose not to use dynamic, cast to Excel.Range before using Value/Value2. Prefer Value2 and explicit Excel enums (or integers) when needed." } } },
+                    new { role = "system", content = new object[]{ new { type = "input_text", text = "Dynamic COM rule: Always use dynamic for all Excel COM objects and chains to avoid object-typed members. Declare dynamic app = Application; dynamic ws = app.ActiveSheet; then use ws.Cells[1,1].Value2, ws.Range(\"A1\", \"B10\"), etc. Do NOT use var where the inferred type would be object; if you choose not to use dynamic, cast to Excel.Range before using Value/Value2. Prefer Value2 and explicit Excel enums. Never emit raw integers for Excel enums; always use named members like Excel.XlCalculation.xlCalculationManual/xlCalculationAutomatic." } } },
                     new { role = "system", content = new object[]{ new { type = "input_text", text = "Do not shadow the injected Application variable (Excel.Application). Do not add using aliases named Application. If you need a local, assign 'var app = Application;' or 'dynamic app = Application;'. Pivot tables are accessed from a worksheet (e.g., ((Excel.Worksheet)app.ActiveSheet).PivotTables(...)) or via workbook PivotCaches, never via Application.PivotTables." } } },
                     new { role = "system", content = new object[]{ new { type = "input_text", text = "No guessing: never invent members or index a method group. If a type or member is unclear, first call web_search (or any provided documentation tool like ITypeInfo) to confirm signatures; if tools are unavailable, ask for clarification and set needs_more_info=true. Stay within the available assemblies and .NET Framework 4.8 surface area; avoid APIs from newer frameworks." } } },
                     new { role = "user",   content = new object[]{ new { type = "input_text", text = userPrompt } } },
@@ -1497,7 +1237,7 @@ catch { }";
                     new { role = "system", content = new object[]{ new { type = "input_text", text = "ExcelContext: " + new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(ctx) } } },
                     new { role = "system", content = new object[]{ new { type = "input_text", text = guidance } } },
                     new { role = "system", content = new object[]{ new { type = "input_text", text = (string.IsNullOrWhiteSpace(_summary) ? "Conversation summary: (none)" : ("Conversation summary: " + _summary)) } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = "Dynamic COM rule: Always use dynamic for all Excel COM objects and chains to avoid object-typed members. Declare dynamic app = Application; dynamic ws = app.ActiveSheet; then use ws.Cells[1,1].Value2, ws.Range(\"A1\", \"B10\"), etc. Do NOT use var where the inferred type would be object; if you choose not to use dynamic, cast to Excel.Range before using Value/Value2. Prefer Value2 and explicit Excel enums (or integers) when needed." } } },
+                    new { role = "system", content = new object[]{ new { type = "input_text", text = "Dynamic COM rule: Always use dynamic for all Excel COM objects and chains to avoid object-typed members. Declare dynamic app = Application; dynamic ws = app.ActiveSheet; then use ws.Cells[1,1].Value2, ws.Range(\"A1\", \"B10\"), etc. Do NOT use var where the inferred type would be object; if you choose not to use dynamic, cast to Excel.Range before using Value/Value2. Prefer Value2 and explicit Excel enums. Never emit raw integers for Excel enums; always use named members like Excel.XlCalculation.xlCalculationManual/xlCalculationAutomatic." } } },
                     new { role = "system", content = new object[]{ new { type = "input_text", text = "Do not shadow the injected Application variable (Excel.Application). Do not add using aliases named Application. If you need a local, assign 'var app = Application;' or 'dynamic app = Application;'. Pivot tables are accessed from a worksheet (e.g., ((Excel.Worksheet)app.ActiveSheet).PivotTables(...)) or via workbook PivotCaches, never via Application.PivotTables." } } },
                     new { role = "system", content = new object[]{ new { type = "input_text", text = "No guessing: never invent members or index a method group. If a type or member is unclear, first call web_search (or any provided documentation tool like ITypeInfo) to confirm signatures; if tools are unavailable, ask for clarification and set needs_more_info=true. Stay within the available assemblies and .NET Framework 4.8 surface area; avoid APIs from newer frameworks." } } },
                     new { role = "system", content = new object[]{ new { type = "input_text", text = "If you are unsure whether a specific Excel COM variable/member exists or its exact name/signature, use web_search to verify against Microsoft Excel Interop/VBA documentation before emitting code. If web_search is unavailable, ask for a brief clarification rather than guessing; do not invent members. When a documentation tool is available (e.g., ITypeInfo), prefer invoking it before emitting code." } } },
@@ -2079,169 +1819,13 @@ catch { }";
             }
         }
 
-        private static Task<string> CallOpenAIAsync(string apiKey, string payloadJson)
-        {
-            // Direct OpenAI HTTP calls are disabled; Semantic Kernel path should be used instead.
-            return Task.FromResult("{\"error\":\"direct OpenAI HTTP path disabled\"}");
-        }
+        // Removed: CallOpenAIAsync
 
 
-        private async Task<string> CallOpenAIResponsesAsync(string apiKey, string userPrompt)
-        {
-            if (string.IsNullOrWhiteSpace(apiKey) || string.IsNullOrWhiteSpace(userPrompt)) return null;
-
-            try
-            {
-                var payload = new
-                {
-                    model = "gpt-4.1",
-                    input = userPrompt,
-                    tools = new object[] { new { type = "web_search" } },
-                    max_output_tokens = 600
-                };
-
-                var serializer = new System.Web.Script.Serialization.JavaScriptSerializer();
-                var json = serializer.Serialize(payload);
-
-                using (var req = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/responses"))
-                {
-                    req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-                    req.Headers.TryAddWithoutValidation("OpenAI-Beta", "responses=v1");
-                    req.Content = new StringContent(json, Encoding.UTF8, "application/json");
-
-                    var resp = await _http.SendAsync(req).ConfigureAwait(false);
-                    resp.EnsureSuccessStatusCode();
-                    var body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                    try { Debug.WriteLine("[OpenAI Responses] " + body); } catch { }
-
-                    var parsed = serializer.DeserializeObject(body) as System.Collections.Generic.Dictionary<string, object>;
-                    if (parsed == null) return null;
-
-                    if (parsed.TryGetValue("output", out var outputObj) && outputObj is object[] outputs)
-                    {
-                        var sb = new StringBuilder();
-                        foreach (var output in outputs)
-                        {
-                            if (output is System.Collections.Generic.Dictionary<string, object> outDict && outDict.TryGetValue("content", out var contentObj) && contentObj is object[] contents)
-                            {
-                                foreach (var c in contents)
-                                {
-                                    if (c is System.Collections.Generic.Dictionary<string, object> cdict)
-                                    {
-                                        if (cdict.TryGetValue("text", out var txt) && txt is string s && !string.IsNullOrWhiteSpace(s))
-                                        {
-                                            sb.AppendLine(s.Trim());
-                                        }
-                                        else if (cdict.TryGetValue("output_text", out var otxt) && otxt is string os && !string.IsNullOrWhiteSpace(os))
-                                        {
-                                            sb.AppendLine(os.Trim());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        var result = sb.ToString();
-                        if (!string.IsNullOrWhiteSpace(result)) return result;
-                    }
-
-                    if (parsed.TryGetValue("output_text", out var directText) && directText is string t && !string.IsNullOrWhiteSpace(t))
-                    {
-                        return t;
-                    }
-
-                    return null;
-                }
-            }
-            catch (Exception ex)
-            {
-                try { Debug.WriteLine("[OpenAI Web Search failure] " + ex); } catch { }
-                return null;
-            }
-        }
+        // Removed: CallOpenAIResponsesAsync (legacy direct Responses HTTP call)
 
 
-        private async Task<string> CallOpenAIWebSearchAsync(string apiKey, string userPrompt)
-        {
-            if (string.IsNullOrWhiteSpace(apiKey) || string.IsNullOrWhiteSpace(userPrompt)) return null;
-
-            try
-            {
-                var payload = new
-                {
-                    model = "gpt-4.1-mini",
-                    input = userPrompt,
-                    tools = new object[] { new { type = "web_search" } },
-                    max_output_tokens = 400
-                };
-
-                var serializer = new System.Web.Script.Serialization.JavaScriptSerializer();
-                var json = serializer.Serialize(payload);
-
-                using (var req = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/responses"))
-                {
-                    req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-                    req.Headers.TryAddWithoutValidation("OpenAI-Beta", "responses=v1");
-                    req.Content = new StringContent(json, Encoding.UTF8, "application/json");
-
-                    try { Debug.WriteLine("[OpenAI WebSearch Request] " + json); } catch { }
-
-                    var resp = await _http.SendAsync(req).ConfigureAwait(false);
-                    var body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                    if (!resp.IsSuccessStatusCode)
-                    {
-                        try
-                        {
-                            Debug.WriteLine($"[OpenAI WebSearch HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}] {body}");
-                        }
-                        catch { }
-                        return null;
-                    }
-                    try { Debug.WriteLine("[OpenAI Responses] " + body); } catch { }
-
-                    var parsed = serializer.DeserializeObject(body) as System.Collections.Generic.Dictionary<string, object>;
-                    if (parsed == null) return null;
-
-                    if (parsed.TryGetValue("output", out var outputObj) && outputObj is object[] outputs)
-                    {
-                        var sb = new StringBuilder();
-                        foreach (var output in outputs)
-                        {
-                            if (output is System.Collections.Generic.Dictionary<string, object> outDict && outDict.TryGetValue("content", out var contentObj) && contentObj is object[] contents)
-                            {
-                                foreach (var c in contents)
-                                {
-                                    if (c is System.Collections.Generic.Dictionary<string, object> cdict)
-                                    {
-                                        if (cdict.TryGetValue("text", out var txt) && txt is string s && !string.IsNullOrWhiteSpace(s))
-                                        {
-                                            sb.AppendLine(s.Trim());
-                                        }
-                                        else if (cdict.TryGetValue("output_text", out var otxt) && otxt is string os && !string.IsNullOrWhiteSpace(os))
-                                        {
-                                            sb.AppendLine(os.Trim());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        var result = sb.ToString();
-                        if (!string.IsNullOrWhiteSpace(result)) return result;
-                    }
-
-                    if (parsed.TryGetValue("output_text", out var directText) && directText is string t && !string.IsNullOrWhiteSpace(t))
-                    {
-                        return t;
-                    }
-
-                    return null;
-                }
-            }
-            catch (Exception ex)
-            {
-                try { Debug.WriteLine("[OpenAI Web Search failure] " + ex); } catch { }
-                return null;
-            }
-        }
+        // Removed: CallOpenAIWebSearchAsync (legacy manual web search prefetch)
 
         
 

@@ -16,18 +16,26 @@ namespace XLify
             _enabled = true;
             try
             {
+                try
+                {
+                    var envUrl = Environment.GetEnvironmentVariable("SEQ_URL");
+                    if (!string.IsNullOrWhiteSpace(envUrl)) seqUrl = envUrl;
+                }
+                catch { }
                 // If Log.Logger wasn't configured yet, set a reasonable default to Seq
                 try
                 {
                     if (Log.Logger == Serilog.Core.Logger.None)
                     {
+                        string apiKey = null;
+                        try { apiKey = Environment.GetEnvironmentVariable("SEQ_API_KEY"); } catch { }
                         Log.Logger = new LoggerConfiguration()
                             .MinimumLevel.Debug()
                             .Enrich.FromLogContext()
                             .Enrich.With(new SemanticKernelTagEnricher())
                             .Enrich.WithProperty("App", "XLify.AddIn")
                             .Enrich.WithProperty("Workspace", "XLify-AddIn")
-                            .WriteTo.Seq(seqUrl)
+                            .WriteTo.Seq(seqUrl, apiKey: string.IsNullOrWhiteSpace(apiKey) ? null : apiKey)
                             .CreateLogger();
                     }
                 }
@@ -39,6 +47,22 @@ namespace XLify
 
                 // Bridge System.Diagnostics.Trace/Debug to Serilog
                 try { Trace.Listeners.Add(new SerilogTraceListener()); } catch { }
+                try { Debug.Listeners.Add(new SerilogTraceListener()); } catch { }
+                try { Trace.AutoFlush = true; Debug.AutoFlush = true; } catch { }
+
+                // Optional Serilog internal diagnostics (set XLIFY_SERILOG_SELFLOG=1)
+                try
+                {
+                    var self = Environment.GetEnvironmentVariable("XLIFY_SERILOG_SELFLOG");
+                    if (!string.IsNullOrWhiteSpace(self) && (self == "1" || self.Equals("true", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "XLify");
+                        Directory.CreateDirectory(root);
+                        var path = Path.Combine(root, "serilog-selflog.txt");
+                        Serilog.Debugging.SelfLog.Enable(TextWriter.Synchronized(File.AppendText(path)));
+                    }
+                }
+                catch { }
             }
             catch { }
         }

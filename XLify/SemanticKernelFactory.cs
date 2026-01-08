@@ -9,7 +9,6 @@ using Microsoft.Extensions.Logging;
 using Serilog;
 using System.Threading.Tasks;
 using System.Diagnostics;
-using System.Text.Json;
 
 public class SeqTimerFilter : IFunctionInvocationFilter
 {
@@ -128,14 +127,27 @@ namespace XLify
 
             var model = "gpt-5-mini";
 
-            Log.Logger = new LoggerConfiguration()
+            var seqUrl = "http://localhost:5341";
+            try { var env = Environment.GetEnvironmentVariable("SEQ_URL"); if (!string.IsNullOrWhiteSpace(env)) seqUrl = env; } catch { }
+            string seqApiKey = null; try { seqApiKey = Environment.GetEnvironmentVariable("SEQ_API_KEY"); } catch { }
+            var logConfig = new LoggerConfiguration()
                 .MinimumLevel.Debug()
                 .Enrich.FromLogContext()
                 .Enrich.With(new SemanticKernelTagEnricher())
                 .Enrich.WithProperty("App", "XLify.AddIn")
                 .Enrich.WithProperty("Workspace", "XLify-AddIn")
-                .WriteTo.Seq("http://localhost:5341") // Ensure Seq is running here
-                .CreateLogger();
+                .WriteTo.Seq(seqUrl, apiKey: string.IsNullOrWhiteSpace(seqApiKey) ? null : seqApiKey);
+
+            try
+            {
+                var root = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "XLify");
+                System.IO.Directory.CreateDirectory(root);
+                var file = System.IO.Path.Combine(root, "addin.log");
+                logConfig = logConfig.WriteTo.File(file, rollingInterval: Serilog.RollingInterval.Day, retainedFileCountLimit: 7, shared: true);
+            }
+            catch { }
+
+            Log.Logger = logConfig.CreateLogger();
 
             // 2. Create the Logger Factory
             var loggerFactory = LoggerFactory.Create(builder =>

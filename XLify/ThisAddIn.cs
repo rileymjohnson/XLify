@@ -1,16 +1,8 @@
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Xml.Linq;
 using Excel = Microsoft.Office.Interop.Excel;
 using Office = Microsoft.Office.Core;
-using Microsoft.Office.Tools.Excel;
 using Microsoft.Office.Tools;
 using System.Windows.Forms;
-using System.Threading.Tasks;
-using System.Diagnostics;
-using System.IO;
 
 namespace XLify
 {
@@ -26,6 +18,7 @@ namespace XLify
             {
                 // Route app stdout/stderr/Trace to Seq early
                 try { LoggingBridge.EnableSeqForApp("http://localhost:5341"); } catch { }
+                try { Serilog.Log.Information("[addin] Startup initialized" ); } catch { }
 
                 this.Application.StatusBar = "XLify add-in loaded (debug)";
                 this.Application.WindowResize += new Excel.AppEvents_WindowResizeEventHandler(Application_WindowResize);
@@ -60,7 +53,7 @@ namespace XLify
                 var app = this.Application;
                 if (app != null)
                 {
-                    app.StatusBar = "XLify ribbon loading (debug)";
+                    app.StatusBar = "XLify ribbon loading";
                 }
             }
             catch { }
@@ -87,10 +80,11 @@ namespace XLify
                         _taskPane.DockPositionRestrict = Office.MsoCTPDockPositionRestrict.msoCTPDockPositionRestrictNoHorizontal;
                     }
                     catch { }
-                    _taskPane.Width = 360;
                 }
-                UpdateTaskPaneWidth();
+                // Show first so the control is parented to the current window/monitor
                 _taskPane.Visible = true;
+                // Recalculate width based on the actual host window DPI
+                UpdateTaskPaneWidth();
             }
             catch { }
         }
@@ -153,7 +147,20 @@ namespace XLify
             {
                 if (_taskPane == null) return;
                 IntPtr hwnd = IntPtr.Zero;
-                try { hwnd = new IntPtr(this.Application?.Hwnd ?? 0); } catch { }
+                try
+                {
+                    // Prefer the task pane control's handle (reflects the actual host window/monitor)
+                    var ctrl = _taskPane.Control as Control;
+                    if (ctrl != null && ctrl.IsHandleCreated)
+                    {
+                        hwnd = ctrl.Handle;
+                    }
+                }
+                catch { }
+                if (hwnd == IntPtr.Zero)
+                {
+                    try { hwnd = new IntPtr(this.Application?.Hwnd ?? 0); } catch { }
+                }
                 double scale = DpiHelper.GetScaleForWindow(hwnd);
                 int target = (int)Math.Round(BasePaneWidthDips * scale);
                 // Clamp to reasonable bounds

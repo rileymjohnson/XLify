@@ -445,7 +445,7 @@ namespace XLify.CSharpExecutor
                 if (string.IsNullOrWhiteSpace(seqUrl)) seqUrl = "http://localhost:5341";
                 var seqApiKey = Environment.GetEnvironmentVariable("SEQ_API_KEY");
 
-                Log.Logger = new LoggerConfiguration()
+                var logCfg = new LoggerConfiguration()
                     .MinimumLevel.Debug()
                     .Enrich.FromLogContext()
                     .Enrich.WithProperty("MachineName", Environment.MachineName)
@@ -454,10 +454,34 @@ namespace XLify.CSharpExecutor
                     .Enrich.WithProperty("Subsystem", "Worker")
                     .Enrich.WithProperty("App", "XLify.CSharpExecutor")
                     .Enrich.WithProperty("Workspace", "XLify-Worker")
-                    .WriteTo.Seq(seqUrl, apiKey: string.IsNullOrWhiteSpace(seqApiKey) ? null : seqApiKey)
-                    .CreateLogger();
+                    .WriteTo.Seq(seqUrl, apiKey: string.IsNullOrWhiteSpace(seqApiKey) ? null : seqApiKey);
+
+                try
+                {
+                    var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "XLify");
+                    Directory.CreateDirectory(root);
+                    var file = Path.Combine(root, "worker.log");
+                    logCfg = logCfg.WriteTo.File(file, rollingInterval: Serilog.RollingInterval.Day, retainedFileCountLimit: 7, shared: true);
+                }
+                catch { }
+
+                Log.Logger = logCfg.CreateLogger();
 
                 Log.Information("Worker starting");
+            }
+            catch { }
+
+            // Enable Serilog self-diagnostics if requested
+            try
+            {
+                var self = Environment.GetEnvironmentVariable("XLIFY_SERILOG_SELFLOG");
+                if (!string.IsNullOrWhiteSpace(self) && (self == "1" || self.Equals("true", StringComparison.OrdinalIgnoreCase)))
+                {
+                    var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "XLify");
+                    Directory.CreateDirectory(root);
+                    var path = Path.Combine(root, "serilog-selflog-worker.txt");
+                    Serilog.Debugging.SelfLog.Enable(TextWriter.Synchronized(File.AppendText(path)));
+                }
             }
             catch { }
 
