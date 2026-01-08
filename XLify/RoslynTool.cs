@@ -32,13 +32,13 @@ namespace XLify
             {
                 var len = (code?.Length ?? 0);
                 var sha = ComputeSha1Hex(code ?? string.Empty);
-                System.Diagnostics.Debug.WriteLine("[RoslynTool] Executing C# (len=" + len + ") for session " + _sessionId);
+                if (ShouldLogRoslynDebug()) System.Diagnostics.Debug.WriteLine("[RoslynTool] Executing C# (len=" + len + ") for session " + _sessionId);
                 try { Log.Information("[RoslynTool] Code SHA={Sha} Length={Len} Session={Session}", sha, len, _sessionId); } catch { }
                 // Optionally log full code if enabled
                 var logCode = Environment.GetEnvironmentVariable("XLIFY_LOG_CODE");
                 if (!string.IsNullOrEmpty(logCode) && (logCode.Equals("1") || logCode.Equals("true", StringComparison.OrdinalIgnoreCase)))
                 {
-                    System.Diagnostics.Debug.WriteLine("[RoslynTool Code]\n" + (code ?? string.Empty));
+                    if (ShouldLogRoslynDebug()) System.Diagnostics.Debug.WriteLine("[RoslynTool Code]\n" + (code ?? string.Empty));
                 }
                 // Persist a pending entry so we can correlate failures if the worker crashes
                 try { MyTaskPaneControl.AppendCodeRun(code ?? string.Empty, false, "submitted"); } catch { }
@@ -51,7 +51,7 @@ namespace XLify
 
             try
             {
-                System.Diagnostics.Debug.WriteLine("[RoslynTool] Success=" + resp?.Success + ", Err=" + resp?.Error + ", OutputLen=" + (resp?.Output?.Length ?? 0) + ", Hwnd=" + hints?.Hwnd + ", Pid=" + hints?.ProcessId);
+                if (ShouldLogRoslynDebug()) System.Diagnostics.Debug.WriteLine("[RoslynTool] Success=" + resp?.Success + ", Err=" + resp?.Error + ", OutputLen=" + (resp?.Output?.Length ?? 0) + ", Hwnd=" + hints?.Hwnd + ", Pid=" + hints?.ProcessId);
             }
             catch { }
 
@@ -112,5 +112,27 @@ namespace XLify
 
             return hints;
         }
+
+        private static bool ShouldLogRoslynDebug() => RoslynToolLogSwitch.Enabled;
     }
 }
+
+internal static class RoslynToolLogSwitch
+{
+    private static bool? _enabled;
+    public static bool Enabled
+    {
+        get
+        {
+            if (_enabled.HasValue) return _enabled.Value;
+            try
+            {
+                var v = Environment.GetEnvironmentVariable("XLIFY_LOG_ROSLYN_DEBUG");
+                _enabled = !string.IsNullOrWhiteSpace(v) && (v.Equals("1") || v.Equals("true", StringComparison.OrdinalIgnoreCase));
+            }
+            catch { _enabled = false; }
+            return _enabled.Value;
+        }
+    }
+}
+

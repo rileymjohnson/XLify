@@ -125,7 +125,7 @@ namespace XLify
                 throw new InvalidOperationException("No API key found. Please save a key via ApiKeyVault (entered via WebView).");
             }
 
-            var model = "gpt-5-mini";
+            var model = "gpt-5";
 
             var seqUrl = "http://localhost:5341";
             try { var env = Environment.GetEnvironmentVariable("SEQ_URL"); if (!string.IsNullOrWhiteSpace(env)) seqUrl = env; } catch { }
@@ -160,7 +160,20 @@ namespace XLify
             // 3. Attach the LoggerFactory to the Kernel
             builder.Services.AddSingleton(loggerFactory);
 
-            builder.AddOpenAIChatCompletion(model, apiKey, serviceId: "chat");
+            // Removed SK ChatCompletion service: Responses API is the only path we use
+
+            // Prepare and register the OpenAI Responses agent in DI before building the kernel
+            try
+            {
+                var oaClient = new OpenAIClient(apiKey);
+                // OPENAI001: Responses client factory is preview; suppress analyzer per SDK guidance
+#pragma warning disable OPENAI001
+                var responsesClient = oaClient.GetOpenAIResponseClient(model);
+#pragma warning restore OPENAI001
+                var responseAgent = new OpenAIResponseAgent(responsesClient);
+                builder.Services.AddSingleton(responseAgent);
+            }
+            catch { }
 
             // 4. Add the Performance Filter
             builder.Plugins.AddFromObject(new RoslynTool(sessionId), "roslyn");
@@ -176,25 +189,17 @@ namespace XLify
             // Ensure prompt filter is active even if DI discovery changes
             try { kernel.PromptRenderFilters.Add(new SeqPromptFilter()); } catch { }
 
+            // After building, attach the kernel instance to the Responses agent
             try
             {
-                // Prepare an OpenAI Responses agent so downstream callers can opt-in to the Responses API.
-                // The agent is created with the same API key and can be used with ChatHistoryChannel.
-                var oaClient = new OpenAIClient(apiKey);
-                // OPENAI001: Responses client factory is preview; suppress analyzer per SDK guidance
-#pragma warning disable OPENAI001
-                var responsesClient = oaClient.GetOpenAIResponseClient(model);
-#pragma warning restore OPENAI001
-                var responseAgent = new OpenAIResponseAgent(responsesClient);
-                try { responseAgent.GetType().GetProperty("Kernel")?.SetValue(responseAgent, kernel); } catch { }
+                var responseAgent = kernel.Services.GetService(typeof(OpenAIResponseAgent)) as OpenAIResponseAgent;
+                if (responseAgent != null)
+                {
+                    try { responseAgent.GetType().GetProperty("Kernel")?.SetValue(responseAgent, kernel); } catch { }
+                }
+            }
+            catch { }
 
-                // Stash the agent on kernel data for retrieval without changing method signatures.
-                kernel.Data["__openai_response_agent__"] = responseAgent;
-            }
-            catch
-            {
-                // If the preview agents package is unavailable at runtime, keep kernel usable.
-            }
             return kernel;
         }
     }

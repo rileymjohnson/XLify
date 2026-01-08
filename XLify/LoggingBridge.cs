@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Linq;
 using System.IO;
 using System.Text;
 using Serilog;
@@ -45,9 +46,16 @@ namespace XLify
                 try { Console.SetOut(new SerilogTextWriter((msg) => Log.Information("[stdout] {Message}", msg))); } catch { }
                 try { Console.SetError(new SerilogTextWriter((msg) => Log.Error("[stderr] {Message}", msg))); } catch { }
 
-                // Bridge System.Diagnostics.Trace/Debug to Serilog
-                try { Trace.Listeners.Add(new SerilogTraceListener()); } catch { }
-                try { Debug.Listeners.Add(new SerilogTraceListener()); } catch { }
+                // Bridge System.Diagnostics.Trace/Debug to Serilog (avoid duplicate listeners)
+                try
+                {
+                    if (!Trace.Listeners.OfType<SerilogTraceListener>().Any())
+                    {
+                        Trace.Listeners.Add(new SerilogTraceListener());
+                    }
+                }
+                catch { }
+                // Use the shared Trace/Debug listeners collection via Trace only; no need to add twice
                 try { Trace.AutoFlush = true; Debug.AutoFlush = true; } catch { }
 
                 // Optional Serilog internal diagnostics (set XLIFY_SERILOG_SELFLOG=1)
@@ -129,12 +137,12 @@ namespace XLify
     {
         public override void Write(string message)
         {
-            try { Log.Information("[trace] {Message}", message); } catch { }
+            try { Log.Debug("[trace] {Message}", message); } catch { }
         }
 
         public override void WriteLine(string message)
         {
-            try { Log.Information("[trace] {Message}", message); } catch { }
+            try { Log.Debug("[trace] {Message}", message); } catch { }
         }
 
         public override void TraceEvent(TraceEventCache eventCache, string source, TraceEventType eventType, int id, string message)

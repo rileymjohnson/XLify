@@ -13,7 +13,7 @@ using System.Net;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.SemanticKernel;
-using Microsoft.SemanticKernel.ChatCompletion;
+using Microsoft.SemanticKernel.ChatCompletion; // still used for ChatHistory and message types
 using Microsoft.SemanticKernel.Connectors.OpenAI;
 using Microsoft.SemanticKernel.Agents;
 using Microsoft.SemanticKernel.Agents.OpenAI;
@@ -31,7 +31,7 @@ namespace XLify
         private bool _sessionCreated;
         // Removed: direct HTTP client for Responses; rely on SK agent
         private Kernel _kernel;
-        private IChatCompletionService _chatService;
+        // Removed: SK IChatCompletionService; we use the Responses agent only
         private OpenAIResponseAgent _responseAgent;
         private readonly SemaphoreSlim _chatLock = new SemaphoreSlim(1, 1);
         private bool _sessionWarmedUp;
@@ -94,7 +94,7 @@ namespace XLify
                     {
                         try
                         {
-                            try { Debug.WriteLine($"[WebView2] {json}"); } catch { }
+                            try { if (ShouldLogWebView2Debug()) Debug.WriteLine($"[WebView2] {json}"); } catch { }
                             try { Console.WriteLine($"[WebView2] {json}"); } catch { }
 
                         // Extract text if present
@@ -155,7 +155,7 @@ namespace XLify
                         }
                         catch (Exception ex)
                         {
-                            try { Debug.WriteLine("[WebView2][Error] " + ex.ToString()); } catch { }
+                            try { if (ShouldLogWebView2Debug()) Debug.WriteLine("[WebView2][Error] " + ex.ToString()); } catch { }
                             SendToWeb("error", null, ex.Message, addToConversation: true);
                         }
                     });
@@ -223,7 +223,7 @@ namespace XLify
 
         private async Task EnsureSemanticKernelAsync()
         {
-            if (_kernel != null && _chatService != null)
+            if (_kernel != null)
             {
                 if (!_sessionCreated)
                 {
@@ -236,27 +236,9 @@ namespace XLify
                 return;
             }
             _kernel = SemanticKernelFactory.CreateKernel(_sessionId);
-            _chatService = _kernel.GetRequiredService<IChatCompletionService>();
             try
             {
-                if (_kernel.Data != null && _kernel.Data.TryGetValue("__openai_response_agent__", out var agentObj))
-                {
-                    _responseAgent = agentObj as OpenAIResponseAgent;
-                }
-                if (_responseAgent == null)
-                {
-                    var apiKey = ApiKeyVault.Get();
-                    if (!string.IsNullOrWhiteSpace(apiKey))
-                    {
-                        var client = new OpenAIClient(apiKey);
-                        // OPENAI001: Responses client factory is preview; suppress analyzer per SDK guidance
-#pragma warning disable OPENAI001
-                        var responsesClient = client.GetOpenAIResponseClient("gpt-5-mini");
-#pragma warning restore OPENAI001
-                        _responseAgent = new OpenAIResponseAgent(responsesClient);
-                        try { _responseAgent.GetType().GetProperty("Kernel")?.SetValue(_responseAgent, _kernel); } catch { }
-                    }
-                }
+                _responseAgent = _kernel.GetRequiredService<OpenAIResponseAgent>();
             }
             catch { }
             try { await RoslynWorkerClient.CreateSessionAsync(_sessionId).ConfigureAwait(false); _sessionCreated = true; } catch { }
@@ -280,9 +262,16 @@ namespace XLify
                 "- Never store Excel COM objects in variables typed as 'object'. Use 'dynamic' or cast to the concrete interop type.\n" +
                 "- When using sheet.Range[...] or Cells[,], either assign to 'dynamic' or explicitly cast: Excel.Range r = (Excel.Range)sheet.Range[sheet.Cells[r1,c1], sheet.Cells[r2,c2]].\n" +
                 "- When using Columns/Rows off a Range, cast before member access if not using dynamic (e.g., ((Excel.Range)r.Columns[1]).ColumnWidth = 12).\n" +
+                "- Optional parameters for COM calls: declare 'object missing = Type.Missing;' and pass 'missing'. NEVER declare 'Type missing' or assign Type.Missing to a System.Type variable.\n" +
+                "- Do not assign arbitrary objects to System.Type. To get a runtime type, use 'var t = obj?.GetType();'. To refer to a type, use 'typeof(Excel.Range)'.\n" +
                 "- Avoid System.Linq and extension methods on COM objects (e.g., do NOT call LINQ Select()). To select a range, use sheet.Range[...].Select(Type.Missing).\n" +
                 "- When explicit typing is needed, use Excel.Worksheet/Excel.Range/Excel.Workbook; otherwise prefer dynamic to reduce COM interop errors.\n" +
                 "- The alias 'Excel = Microsoft.Office.Interop.Excel' is pre-imported; use 'Excel.XlCalculation.*' enums (do NOT emit raw integers).\n" +
+                "- Never assign numeric literals (e.g., 1, 0, -4135) to Excel enum-typed properties. Always use the enum constant, e.g., app.Calculation = Excel.XlCalculation.xlCalculationManual;\n" +
+                "- When toggling calculation, use this exact pattern to capture and restore the previous enum value (not an int):\n" +
+                "  Excel.XlCalculation prevCalc = (Excel.XlCalculation)app.Calculation;\n" +
+                "  try { app.Calculation = Excel.XlCalculation.xlCalculationManual; /* work */ }\n" +
+                "  finally { app.Calculation = prevCalc; }\n" +
                 "- Use APIs that exist for the specific Excel object; branch on object type when needed.\n" +
                 "- For PivotTables: first check if pvt.PivotCache().OLAP is true. If true, use pvt.CubeFields with exact captions; if false, use pvt.PivotFields with exact source header text. Always pvt.RefreshTable() after changes.\n" +
                 "- When writing dates, assign .Value2 with DateTime.ToOADate() doubles.\n" +
@@ -614,20 +603,23 @@ catch { }";
                     response = item;
                 }
 
-                // Log item types for diagnostics (detect tool/function outputs)
+                // Log item types for diagnostics (single consolidated block)
                 try
                 {
-                    var items = response?.Items;
-                    if (items != null)
+                    if (ShouldLogSkItems())
                     {
-                        var sbItems = new StringBuilder();
-                        foreach (var item in items)
+                        var items = response?.Items;
+                        if (items != null)
                         {
-                            sbItems.AppendLine(item?.GetType()?.FullName + ": " + (item?.ToString() ?? string.Empty));
-                        }
-                        if (sbItems.Length > 0)
-                        {
-                            Debug.WriteLine("[SK Responses Agent Items]\n" + sbItems.ToString());
+                            var sbItems = new StringBuilder();
+                            foreach (var item in items)
+                            {
+                                try { sbItems.AppendLine(item?.GetType()?.Name + ": " + item); } catch { }
+                            }
+                            if (sbItems.Length > 0)
+                            {
+                                try { Debug.WriteLine("[SK Items]\n" + sbItems.ToString()); } catch { }
+                            }
                         }
                     }
                 }
@@ -637,23 +629,7 @@ catch { }";
                     throw new InvalidOperationException("OpenAI Responses agent returned no message.");
                 }
 
-                try
-                {
-                    var items = response?.Items;
-                    if (items != null)
-                    {
-                        var sbItems = new StringBuilder();
-                        foreach (var item in items)
-                        {
-                            try { sbItems.AppendLine(item?.GetType()?.Name + ": " + item); } catch { }
-                        }
-                        if (sbItems.Length > 0)
-                        {
-                            try { Debug.WriteLine("[SK Items]\n" + sbItems.ToString()); } catch { }
-                        }
-                    }
-                }
-                catch { }
+                // (duplicate block removed)
                 var text = ExtractChatText(response);
                 if (string.IsNullOrWhiteSpace(text))
                 {
@@ -677,6 +653,28 @@ catch { }";
         {
             if (s == null) return string.Empty;
             return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r");
+        }
+
+        private static bool ShouldLogWebView2Debug()
+        {
+            try
+            {
+                var v = Environment.GetEnvironmentVariable("XLIFY_LOG_WEBVIEW2_DEBUG");
+                if (string.IsNullOrWhiteSpace(v)) return false; // default off
+                return v.Equals("1") || v.Equals("true", StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
+
+        private static bool ShouldLogSkItems()
+        {
+            try
+            {
+                var v = Environment.GetEnvironmentVariable("XLIFY_LOG_SK_ITEMS");
+                if (string.IsNullOrWhiteSpace(v)) return false; // default: off to keep logs clean
+                return v.Equals("1") || v.Equals("true", StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
         }
 
         
@@ -991,27 +989,7 @@ catch { }";
             catch { return "Recent code: (none)"; }
         }
 
-        private static bool IsRateLimitMessage(string text, out int waitSeconds)
-        {
-            waitSeconds = 0;
-            try
-            {
-                if (string.IsNullOrWhiteSpace(text)) return false;
-                var t = text;
-                if (t.IndexOf("rate limit", StringComparison.OrdinalIgnoreCase) < 0 && t.IndexOf("rate_limit", StringComparison.OrdinalIgnoreCase) < 0)
-                {
-                    return false;
-                }
-                // Try to extract "Please try again in 20s"
-                var m = System.Text.RegularExpressions.Regex.Match(t, "try again in\\s+(\\d+)s", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                if (m.Success)
-                {
-                    int v; if (int.TryParse(m.Groups[1].Value, out v)) waitSeconds = v;
-                }
-                return true;
-            }
-            catch { return false; }
-        }
+        // Removed: IsRateLimitMessage (unused)
 
         private static string BuildJsonSafe(string type, string jsonObjectOrArray, string plainText)
         {
@@ -1040,238 +1018,7 @@ catch { }";
             return serializer.Serialize(new { type = type, text = plainText ?? string.Empty });
         }
 
-        private static string ExtractAssistantContent(string responseJson)
-        {
-            try
-            {
-                var serializer = new System.Web.Script.Serialization.JavaScriptSerializer();
-                var root = serializer.DeserializeObject(responseJson) as System.Collections.Generic.Dictionary<string, object>;
-                if (root != null)
-                {
-                    // If the API returned an error payload, surface it
-                    if (root.ContainsKey("error"))
-                    {
-                        try
-                        {
-                            var err = root["error"] as System.Collections.Generic.Dictionary<string, object>;
-                            if (err != null)
-                            {
-                                string msg = null;
-                                if (err.ContainsKey("message")) msg = err["message"] as string;
-                                if (string.IsNullOrWhiteSpace(msg) && err.ContainsKey("type")) msg = "OpenAI error: " + (err["type"] as string);
-                                if (!string.IsNullOrWhiteSpace(msg)) return msg;
-                            }
-                        }
-                        catch { }
-                    }
-                    if (root.ContainsKey("output_text"))
-                    {
-                        var outText = root["output_text"] as string;
-                        if (!string.IsNullOrEmpty(outText)) return outText;
-                    }
-                    if (root.ContainsKey("output"))
-                    {
-                        var output = root["output"] as object[];
-                        if (output != null)
-                        {
-                            var sb = new StringBuilder();
-                            foreach (var item in output)
-                            {
-                                var dict = item as System.Collections.Generic.Dictionary<string, object>;
-                                if (dict != null && dict.ContainsKey("content"))
-                                {
-                                    var contentArr = dict["content"] as object[];
-                                    if (contentArr != null)
-                                    {
-                                        foreach (var c in contentArr)
-                                        {
-                                            var cd = c as System.Collections.Generic.Dictionary<string, object>;
-                                            if (cd != null && cd.ContainsKey("text"))
-                                            {
-                                                var t = cd["text"] as string;
-                                                if (!string.IsNullOrEmpty(t)) sb.Append(t);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            if (sb.Length > 0) return sb.ToString();
-                        }
-                    }
-                    // Fallback to chat.completions shape
-                    if (root.ContainsKey("choices"))
-                    {
-                        var choices = root["choices"] as object[];
-                        if (choices != null && choices.Length > 0)
-                        {
-                            var first = choices[0] as System.Collections.Generic.Dictionary<string, object>;
-                            if (first != null)
-                            {
-                                if (first.ContainsKey("message"))
-                                {
-                                    var msg = first["message"] as System.Collections.Generic.Dictionary<string, object>;
-                                    if (msg != null && msg.ContainsKey("content"))
-                                    {
-                                        var content = msg["content"] as string;
-                                        if (!string.IsNullOrEmpty(content)) return content;
-                                    }
-                                }
-                                if (first.ContainsKey("text"))
-                                {
-                                    var text = first["text"] as string;
-                                    if (!string.IsNullOrEmpty(text)) return text;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            catch { }
-            return null;
-        }
-
-        private static (string code, string response, bool needsMoreInfo)? TryParseAssistantJson(string assistantText)
-        {
-            if (string.IsNullOrWhiteSpace(assistantText)) return null;
-            try
-            {
-                // Strip code fences if present
-                var s = assistantText.Trim();
-                if (s.StartsWith("```"))
-                {
-                    var idx = s.IndexOf('\n');
-                    if (idx >= 0) s = s.Substring(idx + 1);
-                    if (s.EndsWith("```")) s = s.Substring(0, s.Length - 3);
-                }
-                var serializer = new System.Web.Script.Serialization.JavaScriptSerializer();
-                var obj = serializer.DeserializeObject(s) as System.Collections.Generic.Dictionary<string, object>;
-                if (obj == null) return null;
-                string code = null, response = null;
-                bool needsMoreInfo = false;
-                if (obj.ContainsKey("code")) code = obj["code"] as string;
-                if (obj.ContainsKey("response")) response = obj["response"] as string;
-                if (obj.ContainsKey("needs_more_info"))
-                {
-                    try { needsMoreInfo = Convert.ToBoolean(obj["needs_more_info"]); } catch { needsMoreInfo = false; }
-                }
-                if (code != null || response != null || obj.ContainsKey("needs_more_info")) return (code ?? string.Empty, response ?? string.Empty, needsMoreInfo);
-            }
-            catch { }
-            return null;
-        }
-
-        private static object BuildChatMessages(string userPrompt)
-        {
-            var ctx = CollectExcelContext();
-            try
-            {
-                var ctxJson = new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(ctx);
-                try { System.Diagnostics.Debug.WriteLine("[ExcelContext] " + ctxJson); } catch { }
-                try { System.Console.WriteLine("[ExcelContext] " + ctxJson); } catch { }
-            }
-            catch { }
-            // Note: include explicit guidance for COM-only capabilities like Solver/Power Query
-            var specialCapabilities =
-                "Special capabilities: You can use Excel COM automation to control add-ins. " +
-                "Solver: call Application.Run with 'Solver.xlam' macros (e.g., Application.Run(\\\"Solver.xlam!SolverReset\\\"); " +
-                "Application.Run(\\\"Solver.xlam!SolverOk\\\", targetRange, 2, 0, byChangeRange); Application.Run(\\\"Solver.xlam!SolverSolve\\\", true)). " +
-                "Verify the Solver add-in is installed/loaded (see ExcelContext.addIns) and set needs_more_info if not. " +
-                "Power Query: refresh queries via Application.ActiveWorkbook.RefreshAll() or iterate Application.ActiveWorkbook.Queries and call Refresh() where available. " +
-                "Analysis ToolPak: accessible via Application.Run on ATPVBAEN.XLAM macros when present (confirm via addIns before invoking).";
-            return new
-            {
-                model = "gpt-4o",
-                input = new object[]
-                {
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = "You are an Excel assistant. Plan steps and generate C# Roslyn script to automate Excel. Ask clarifying questions when needed. Execution environment: top-level C# with variable 'Application' (Microsoft.Office.Interop.Excel.Application). For Excel COM collections (Worksheets, Sheets, Tables, PivotTables, PivotFields, ListObjects, Names, Queries, Connections), always use parentheses to index (e.g., Application.Worksheets(\"Sheet1\"), pivotTable.PivotFields(\"Date\"), listObject.ListColumns(1)). Do NOT use square brackets. Cast collection items to the concrete interop type before calling members when needed (e.g., var pf = (Excel.PivotField)pivotTable.PivotFields(\"Date\"); pf.Group();). Runtime: C# script via Microsoft.CodeAnalysis.CSharp.Scripting 4.9 targeting .NET Framework 4.8; use only features available in C# 10 or earlier and APIs present in referenced assemblies (mscorlib, System.Core, System.Threading.Tasks, System.Windows.Forms, Microsoft.Office.Interop.Excel). Declare concrete collection types (e.g., List<T>) when you need Add/Count; do not assume object/dynamic supports Add." } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = "ExcelContext: " + new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(ctx) } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = (string.IsNullOrWhiteSpace(_summary) ? "Conversation summary: (none)" : ("Conversation summary: " + _summary)) } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = BuildRecentCodeSummary() } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = BuildRecentCodeSummary() } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = "Special capabilities: You can use Excel COM automation to control add-ins. Solver: call Application.Run with 'Solver.xlam' macros (e.g., Application.Run(\\\"Solver.xlam!SolverReset\\\"); Application.Run(\\\"Solver.xlam!SolverOk\\\", targetRange, 2, 0, byChangeRange); Application.Run(\\\"Solver.xlam!SolverSolve\\\", true)). Verify the Solver add-in is installed/loaded (see ExcelContext.addIns) and set needs_more_info if not. Power Query: refresh queries via Application.ActiveWorkbook.RefreshAll() or iterate Application.ActiveWorkbook.Queries and call Refresh() where available. Analysis ToolPak: accessible via Application.Run on ATPVBAEN.XLAM macros when present (confirm via addIns before invoking)." } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = specialCapabilities } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = "Dynamic COM rule: Always use dynamic for all Excel COM objects and chains to avoid object-typed members. Declare dynamic app = Application; dynamic ws = app.ActiveSheet; then use ws.Cells[1,1].Value2, ws.Range(\"A1\", \"B10\"), etc. Do NOT use var where the inferred type would be object; if you choose not to use dynamic, cast to Excel.Range before using Value/Value2. Prefer Value2 and explicit Excel enums. Never emit raw integers for Excel enums; always use named members like Excel.XlCalculation.xlCalculationManual/xlCalculationAutomatic." } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = "Do not shadow the injected Application variable (Excel.Application). Do not add using aliases named Application. If you need a local, assign 'var app = Application;' or 'dynamic app = Application;'. Pivot tables are accessed from a worksheet (e.g., ((Excel.Worksheet)app.ActiveSheet).PivotTables(...)) or via workbook PivotCaches, never via Application.PivotTables." } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = "No guessing: never invent members or index a method group. If a type or member is unclear, first call web_search (or any provided documentation tool like ITypeInfo) to confirm signatures; if tools are unavailable, ask for clarification and set needs_more_info=true. Stay within the available assemblies and .NET Framework 4.8 surface area; avoid APIs from newer frameworks." } } },
-                    new { role = "user",   content = new object[]{ new { type = "input_text", text = userPrompt } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = "Respond ONLY as a single JSON object (no prose, no code fences) with exactly these fields: {\\\"code\\\": string, \\\"response\\\": string, \\\"needs_more_info\\\": boolean}. Rules: (1) Provide ONLY valid C# statements intended to live inside a method body (no using directives, no namespace, no class/method definitions). (2) Do NOT call members on unknown COM types. Determine the concrete Excel type first and only use members valid for that type. Prefer explicit casts to Excel types (e.g., (Excel.Worksheet)Application.ActiveSheet) or null-checked dynamic only after verifying the member. (3) Geometry: only call Width/Height/Left/Top on Excel.Shape, Excel.ShapeRange, or Excel.ChartObject. For Excel.Range, use ColumnWidth/RowHeight instead. (4) Access ranges with the two-argument form: ws.Range(\\\"A1\\\", \\\"B10\\\"); avoid \"A1:B10\" and indexers. (5) Do not invent members; use only real Excel object model members. (6) If the requested action is ambiguous or missing required specifics (e.g., unspecified sheet/range/table/pivot/chart, unclear fields, or multiple candidates in ExcelContext), set needs_more_info=true and ask a concise first-person question in the response describing exactly what you need; leave code empty. (7) Do not include comments or backticks; no markdown. (8) Do NOT use C# string interpolation (no $\\\"...\\\"); use string concatenation or string.Format instead. (9) Keep it self-contained and minimal. The response field must start with 'I' plus a natural past-tense verb (e.g., 'I autofit all columns', 'I formatted the header row', 'I refreshed all queries') - avoid generic 'I did ...'. The response must be specific (include sheet names, ranges, counts, and add-in names when applicable). If you cannot be specific, set needs_more_info=true and leave code blank. Do not add any other fields." } } }
-                },
-                tools = new object[] { new { type = "web_search" } },
-                tool_choice = "auto",
-                text = new
-                {
-                    format = new
-                    {
-                        type = "json_schema",
-                        name = "xlify_action",
-                        schema = new
-                        {
-                            type = "object",
-                            properties = new
-                            {
-                                code = new { type = "string" },
-                                response = new { type = "string" },
-                                needs_more_info = new { type = "boolean" }
-                            },
-                            required = new[] { "code", "response", "needs_more_info" },
-                            additionalProperties = false
-                        },
-                        strict = true
-                    }
-                },
-                temperature = 0.0,
-                max_output_tokens = 1024
-            };
-        }
-
-        private static object BuildRepairMessages(string userPrompt, string priorCode, string errorDetails)
-        {
-            var ctx = CollectExcelContext();
-            var guidance = "The previous attempt failed at compile-time or runtime. Read the error and fix the code. Keep responses in the same JSON schema. Resolve COM member errors by branching on the concrete Excel type and using only members valid for that type (e.g., use ColumnWidth/RowHeight for Range; use Width/Height only for Shape/ShapeRange/ChartObject). Prefer explicit Excel types like Excel.Worksheet/Excel.Range. Do NOT use C# string interpolation (no $\"...\"); use concatenation or string.Format. If you need more info from the user, set needs_more_info=true and ask a concise first-person question in the response; leave code blank.";
-            return new
-            {
-                model = "gpt-4o",
-                input = new object[]
-                {
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = "You are an Excel assistant. Plan steps and generate C# Roslyn script to automate Excel. Ask clarifying questions when needed. Execution environment: top-level C# with variable 'Application' (Microsoft.Office.Interop.Excel.Application). Runtime: C# script via Microsoft.CodeAnalysis.CSharp.Scripting 4.9 targeting .NET Framework 4.8; use only features available in C# 10 or earlier and APIs present in referenced assemblies (mscorlib, System.Core, System.Threading.Tasks, System.Windows.Forms, Microsoft.Office.Interop.Excel). Declare concrete collection types (e.g., List<T>) when you need Add/Count; do not assume object/dynamic supports Add." } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = "ExcelContext: " + new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(ctx) } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = guidance } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = (string.IsNullOrWhiteSpace(_summary) ? "Conversation summary: (none)" : ("Conversation summary: " + _summary)) } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = "Dynamic COM rule: Always use dynamic for all Excel COM objects and chains to avoid object-typed members. Declare dynamic app = Application; dynamic ws = app.ActiveSheet; then use ws.Cells[1,1].Value2, ws.Range(\"A1\", \"B10\"), etc. Do NOT use var where the inferred type would be object; if you choose not to use dynamic, cast to Excel.Range before using Value/Value2. Prefer Value2 and explicit Excel enums. Never emit raw integers for Excel enums; always use named members like Excel.XlCalculation.xlCalculationManual/xlCalculationAutomatic." } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = "Do not shadow the injected Application variable (Excel.Application). Do not add using aliases named Application. If you need a local, assign 'var app = Application;' or 'dynamic app = Application;'. Pivot tables are accessed from a worksheet (e.g., ((Excel.Worksheet)app.ActiveSheet).PivotTables(...)) or via workbook PivotCaches, never via Application.PivotTables." } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = "No guessing: never invent members or index a method group. If a type or member is unclear, first call web_search (or any provided documentation tool like ITypeInfo) to confirm signatures; if tools are unavailable, ask for clarification and set needs_more_info=true. Stay within the available assemblies and .NET Framework 4.8 surface area; avoid APIs from newer frameworks." } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = "If you are unsure whether a specific Excel COM variable/member exists or its exact name/signature, use web_search to verify against Microsoft Excel Interop/VBA documentation before emitting code. If web_search is unavailable, ask for a brief clarification rather than guessing; do not invent members. When a documentation tool is available (e.g., ITypeInfo), prefer invoking it before emitting code." } } },
-                    new { role = "user",   content = new object[]{ new { type = "input_text", text = "User prompt: \n" + userPrompt } } },
-                    new { role = "assistant", content = new object[]{ new { type = "output_text", text = new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new { code = priorCode ?? string.Empty, response = "", needs_more_info = false }) } } },
-                    new { role = "system", content = new object[]{ new { type = "input_text", text = "Fix the issues below and return new JSON: \n" + errorDetails } } }
-                },
-                tools = new object[] { new { type = "web_search" } },
-                tool_choice = "auto",
-                text = new
-                {
-                    format = new
-                    {
-                        type = "json_schema",
-                        name = "xlify_action",
-                        schema = new
-                        {
-                            type = "object",
-                            properties = new
-                            {
-                                code = new { type = "string" },
-                                response = new { type = "string" },
-                                needs_more_info = new { type = "boolean" }
-                            },
-                            required = new[] { "code", "response", "needs_more_info" },
-                            additionalProperties = false
-                        },
-                        strict = true
-                    }
-                },
-                temperature = 0.0,
-                max_output_tokens = 1024
-            };
-        }
+        // Removed: legacy HTTP payload helpers (ExtractAssistantContent, TryParseAssistantJson, BuildChatMessages)
 
         private static object CollectExcelContext()
         {
