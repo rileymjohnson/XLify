@@ -64,15 +64,6 @@ namespace XLify
                 exec.DestroySession(sessionId ?? "default");
             }, cancel);
         }
-
-        public static Task ShowMessageAsync(string text, string caption = null, CancellationToken cancel = default)
-        {
-            return Task.Run(() =>
-            {
-                var exec = EnsureExecutor();
-                exec.ShowMessage(text ?? string.Empty, caption ?? "XLify");
-            }, cancel);
-        }
     }
 
     internal sealed class ExecutionOptions

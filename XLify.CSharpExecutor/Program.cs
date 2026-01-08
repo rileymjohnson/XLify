@@ -23,7 +23,6 @@ namespace XLify.CSharpExecutor
     public interface ICSharpExecutor
     {
         bool Ping();
-        void ShowMessage(string text, string title);
         void CreateSession(string sessionId, object excelApp);
         void ResetSession(string sessionId);
         void DestroySession(string sessionId);
@@ -40,13 +39,6 @@ namespace XLify.CSharpExecutor
         private static readonly ConcurrentDictionary<string, SessionState> Sessions = new ConcurrentDictionary<string, SessionState>(StringComparer.Ordinal);
 
         public bool Ping() => true;
-
-        public void ShowMessage(string text, string title)
-        {
-            var caption = string.IsNullOrWhiteSpace(title) ? "XLify" : title;
-            MessageBox.Show(text ?? string.Empty, caption, MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-
         public void CreateSession(string sessionId, object excelApp)
         {
             if (string.IsNullOrWhiteSpace(sessionId)) sessionId = "default";

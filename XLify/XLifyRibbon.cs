@@ -22,7 +22,6 @@ namespace XLify
       <tab idMso='TabAddIns'>
         <group id='grpXLifyMain' label='XLify'>
           <toggleButton id='btnOpenTaskPane' label='Open' size='large' onAction='OnTogglePane' getPressed='GetPanePressed' image='XLify_logo_32' />
-          <button id='btnTestWorker' label='Test Worker' size='large' onAction='OnTestWorker' />
         </group>
       </tab>
     </tabs>
@@ -35,27 +34,6 @@ namespace XLify
                 return null;
             }
         }
-
-        public void OnTestWorker(Office.IRibbonControl control)
-        {
-            try
-            {
-                var type = Type.GetTypeFromProgID("XLify.CSharpExecutor");
-                if (type == null)
-                {
-                    throw new InvalidOperationException("COM server XLify.CSharpExecutor is not registered.");
-                }
-
-                dynamic executor = Activator.CreateInstance(type);
-                executor?.ShowMessage("Hello from XLify (COM)", "Test Worker");
-            }
-            catch (Exception ex)
-            {
-                try { System.Windows.Forms.MessageBox.Show("Worker call failed: " + ex.Message, "XLify", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error); } catch { }
-            }
-        }
-
-
         public void OnTogglePane(Office.IRibbonControl control, bool pressed)
         {
             // Ignore 'pressed' and toggle based on actual pane state to avoid UI desync
